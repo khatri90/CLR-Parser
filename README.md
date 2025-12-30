@@ -49,18 +49,30 @@ LR(1) parsers use **one token of lookahead** to make parsing decisions, enabling
 
 ## Screenshots
 
-```
-+------------------+     +------------------+     +------------------+
-|   Grammar Tab    |     |   States Tab     |     |   Diagram Tab    |
-|                  |     |                  |     |                  |
-| Productions:     |     | I0: [S'->. S,$]  |     |   [I0]--a-->[I1] |
-| 0: S' -> S       |     |     [S->. aAd,$] |     |    |             |
-| 1: S -> a A d    |     |     ...          |     |    b             |
-| ...              |     |                  |     |    v             |
-|                  |     | I1: [S->a. Ad,$] |     |   [I2]--c-->[I3] |
-| FIRST(S) = {a,b} |     |     [A->. c,d]   |     |                  |
-+------------------+     +------------------+     +------------------+
-```
+### Grammar Tab
+View the augmented grammar with numbered productions and computed FIRST sets for all non-terminals.
+
+![Grammar Tab](images/grammar-tab.png)
+
+### LR(1) States Tab
+Explore all LR(1) states with their complete item sets including lookahead symbols, plus state transitions.
+
+![LR(1) States Tab](images/states-tab.png)
+
+### Automaton Diagram
+Interactive visual representation of the LR(1) automaton with zoomable, pannable canvas.
+
+![Automaton Diagram](images/diagram-tab.png)
+
+### Parsing Table
+Complete ACTION and GOTO tables with clear notation for shift, reduce, and accept actions.
+
+![Parsing Table](images/parsing-table-tab.png)
+
+### Parsing Simulation
+Step-by-step parsing simulation showing stack contents, remaining input, and action trace.
+
+![Parsing Simulation](images/simulation-tab.png)
 
 ---
 
@@ -187,6 +199,7 @@ CLR-Parser-Studio/
 |   |-- lr1_parser.py    # Core CLR algorithm implementation
 |   |-- ui.py            # Tkinter GUI application
 |   |-- main.py          # Application entry point
+|-- images/              # Screenshots for documentation
 |-- README.md
 ```
 

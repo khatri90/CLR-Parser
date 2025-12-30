@@ -252,31 +252,26 @@ class LR1Parser:
         - Add [B -> . gamma, b] to the set
         """
         closure_set = set(items)
-        changed = True
+        worklist = list(items)
+        
+        while worklist:
+            item = worklist.pop(0)
+            next_sym = item.next_symbol
 
-        while changed:
-            changed = False
-            new_items = set()
+            if next_sym and next_sym in self.grammar.non_terminals:
+                # Get beta (symbols after B in A -> alpha . B beta)
+                beta = item.rest_after_next
+                # Compute FIRST(beta a) where a is the lookahead
+                first_beta_a = self._compute_first_beta_a(beta, item.lookahead)
 
-            for item in closure_set:
-                next_sym = item.next_symbol
-
-                if next_sym and next_sym in self.grammar.non_terminals:
-                    # Get beta (symbols after B in A -> alpha . B beta)
-                    beta = item.rest_after_next
-                    # Compute FIRST(beta a) where a is the lookahead
-                    first_beta_a = self._compute_first_beta_a(beta, item.lookahead)
-
-                    # Add all productions for B with appropriate lookaheads
-                    for prod in self.grammar.get_productions_for(next_sym):
-                        for lookahead in first_beta_a:
-                            if lookahead != 'ε':  # Don't use epsilon as lookahead
-                                new_item = LR1Item(prod, 0, lookahead)
-                                if new_item not in closure_set:
-                                    new_items.add(new_item)
-                                    changed = True
-
-            closure_set.update(new_items)
+                # Add all productions for B with appropriate lookaheads
+                for prod in self.grammar.get_productions_for(next_sym):
+                    for lookahead in first_beta_a:
+                        if lookahead != 'ε':  # Don't use epsilon as lookahead
+                            new_item = LR1Item(prod, 0, lookahead)
+                            if new_item not in closure_set:
+                                closure_set.add(new_item)
+                                worklist.append(new_item)
 
         return frozenset(closure_set)
 
@@ -450,7 +445,8 @@ class LR1Parser:
             state = stack[-1]
             current_token = tokens[pos]
 
-            actions = self.action_table.get((state, current_token), [])
+            # Sort actions to ensure deterministic behavior
+            actions = sorted(self.action_table.get((state, current_token), []))
 
             step = {
                 'stack': list(stack),

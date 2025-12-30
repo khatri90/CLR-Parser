@@ -5,8 +5,9 @@ Complete visualization of LR(1) parsing with tables, states, and simulation.
 
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
-from typing import Optional
+from typing import Optional, Dict, Tuple, List
 import threading
+import math
 
 from lr1_parser import Grammar, LR1Parser, parse_grammar_text, LR1Item
 
@@ -27,6 +28,15 @@ class LR1ParserApp:
         self.simulation_steps = []
         self.current_step = 0
         self.simulation_running = False
+
+        # Diagram state
+        self.diagram_scale = 1.0
+        self.diagram_offset_x = 0
+        self.diagram_offset_y = 0
+        self.node_positions: Dict[int, Tuple[float, float]] = {}
+        self.node_sizes: Dict[int, Tuple[float, float]] = {}
+        self.dragging = False
+        self.drag_start = (0, 0)
 
         # Configure styles
         self._setup_styles()
@@ -151,7 +161,7 @@ class LR1ParserApp:
         speed_frame.pack(fill=tk.X, pady=5)
         ttk.Label(speed_frame, text="Speed:").pack(side=tk.LEFT)
         self.speed_var = tk.IntVar(value=500)
-        speed_scale = ttk.Scale(speed_frame, from_=100, to=2000,
+        speed_scale = ttk.Scale(speed_frame, from_=2000, to=100,
                                 variable=self.speed_var, orient=tk.HORIZONTAL)
         speed_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(speed_frame, text="ms").pack(side=tk.LEFT)
@@ -184,17 +194,22 @@ class LR1ParserApp:
         self.notebook.add(self.states_tab, text="LR(1) States")
         self._create_states_display(self.states_tab)
 
-        # Tab 3: Parsing Table
+        # Tab 3: Automaton Diagram
+        self.diagram_tab = ttk.Frame(self.notebook, padding=5)
+        self.notebook.add(self.diagram_tab, text="Diagram")
+        self._create_diagram_display(self.diagram_tab)
+
+        # Tab 4: Parsing Table
         self.table_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.table_tab, text="Parsing Table")
         self._create_table_display(self.table_tab)
 
-        # Tab 4: Conflicts
+        # Tab 5: Conflicts
         self.conflicts_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.conflicts_tab, text="Conflicts")
         self._create_conflicts_display(self.conflicts_tab)
 
-        # Tab 5: Simulation
+        # Tab 6: Simulation
         self.sim_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.sim_tab, text="Simulation")
         self._create_simulation_display(self.sim_tab)
@@ -254,6 +269,525 @@ class LR1ParserApp:
             state=tk.DISABLED, wrap=tk.WORD
         )
         self.transitions_text.pack(fill=tk.BOTH, expand=True)
+
+    def _create_diagram_display(self, parent):
+        """Create the automaton diagram display area."""
+        # Control frame at top
+        control_frame = ttk.Frame(parent)
+        control_frame.pack(fill=tk.X, pady=(0, 5))
+
+        ttk.Label(control_frame, text="LR(1) Automaton Diagram", style='Header.TLabel').pack(side=tk.LEFT)
+
+        # Zoom controls
+        ttk.Button(control_frame, text="Zoom In", command=self._zoom_in).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(control_frame, text="Zoom Out", command=self._zoom_out).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(control_frame, text="Reset View", command=self._reset_diagram_view).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(control_frame, text="Fit to Window", command=self._fit_diagram).pack(side=tk.RIGHT, padx=2)
+
+        # Canvas frame with scrollbars
+        canvas_frame = ttk.Frame(parent)
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Create canvas
+        self.diagram_canvas = tk.Canvas(
+            canvas_frame, bg='white', highlightthickness=1,
+            highlightbackground='gray'
+        )
+
+        # Scrollbars
+        h_scroll = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, command=self.diagram_canvas.xview)
+        v_scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=self.diagram_canvas.yview)
+        self.diagram_canvas.configure(xscrollcommand=h_scroll.set, yscrollcommand=v_scroll.set)
+
+        # Grid layout
+        self.diagram_canvas.grid(row=0, column=0, sticky='nsew')
+        v_scroll.grid(row=0, column=1, sticky='ns')
+        h_scroll.grid(row=1, column=0, sticky='ew')
+
+        canvas_frame.grid_rowconfigure(0, weight=1)
+        canvas_frame.grid_columnconfigure(0, weight=1)
+
+        # Bind mouse events for panning
+        self.diagram_canvas.bind('<ButtonPress-1>', self._on_diagram_press)
+        self.diagram_canvas.bind('<B1-Motion>', self._on_diagram_drag)
+        self.diagram_canvas.bind('<ButtonRelease-1>', self._on_diagram_release)
+        self.diagram_canvas.bind('<MouseWheel>', self._on_diagram_scroll)
+
+        # Legend frame
+        legend_frame = ttk.LabelFrame(parent, text="Legend", padding=5)
+        legend_frame.pack(fill=tk.X, pady=(5, 0))
+
+        legend_text = "Green boxes = States with LR(1) items | Arrows = Transitions | Drag to pan | Scroll to zoom"
+        ttk.Label(legend_frame, text=legend_text, font=('Segoe UI', 9)).pack()
+
+    def _calculate_node_positions(self):
+        """Calculate positions for state nodes using a layered layout."""
+        if not self.parser or not self.parser.states:
+            return
+
+        self.node_positions.clear()
+        self.node_sizes.clear()
+
+        # Calculate size for each node based on number of items
+        base_width = 120
+        base_height = 60
+        item_height = 16
+
+        for state in self.parser.states:
+            num_items = len(state.items)
+            # Calculate size for each node based on content
+            max_text_len = 10  # Minimum width equivalent
+            items = sorted(state.items, key=lambda item: (str(item.production), item.dot_position, item.lookahead), reverse=True)
+            display_items = min(num_items, 8)
+            
+            # Estimate width based on longest item string
+            for item in items[:display_items]:
+                # "A->.BC,a" length
+                item_len = len(str(item.production)) + 4 
+                max_text_len = max(max_text_len, item_len)
+            
+            # Heuristic: 8 pixels per character approx + padding
+            width = max(base_width, max_text_len * 9)
+            height = base_height + display_items * item_height
+            self.node_sizes[state.id] = (width, height)
+
+        # Use a hierarchical layout based on BFS from state 0
+        levels: Dict[int, List[int]] = {}
+        visited = set()
+        queue = [(0, 0)]  # (state_id, level)
+
+        while queue:
+            state_id, level = queue.pop(0)
+            if state_id in visited:
+                continue
+            visited.add(state_id)
+
+            if level not in levels:
+                levels[level] = []
+            levels[level].append(state_id)
+
+            # Add children (states reachable via transitions)
+            if state_id < len(self.parser.states):
+                state = self.parser.states[state_id]
+                for target in state.transitions.values():
+                    if target not in visited:
+                        queue.append((target, level + 1))
+
+        # Add any unvisited states to the last level
+        for state in self.parser.states:
+            if state.id not in visited:
+                max_level = max(levels.keys()) if levels else 0
+                if max_level not in levels:
+                    levels[max_level] = []
+                levels[max_level].append(state.id)
+
+        # Calculate positions with dynamic spacing
+        h_spacing = 200
+        v_spacing = 180
+        start_x = 150
+        start_y = 100
+
+        for level, state_ids in levels.items():
+            num_in_level = len(state_ids)
+            # Calculate total height needed for this level
+            total_height = sum(self.node_sizes.get(sid, (base_width, base_height))[1] + 40
+                             for sid in state_ids)
+
+            current_y = start_y + 200 - total_height / 2
+
+            for state_id in state_ids:
+                x = start_x + level * h_spacing
+                node_height = self.node_sizes.get(state_id, (base_width, base_height))[1]
+                self.node_positions[state_id] = (x, current_y + node_height / 2)
+                current_y += node_height + 50
+
+    def _draw_diagram(self):
+        """Draw the LR(1) automaton diagram on the canvas."""
+        self.diagram_canvas.delete('all')
+
+        if not self.parser or not self.parser.states:
+            self.diagram_canvas.create_text(
+                400, 300, text="Build a parser to see the automaton diagram",
+                font=('Segoe UI', 12), fill='gray'
+            )
+            return
+
+        self._calculate_node_positions()
+
+        # Draw start arrow pointing to initial state
+        self._draw_start_arrow()
+
+        # Draw transitions (arrows) first so they appear behind nodes
+        self._draw_transitions()
+
+        # Draw state nodes
+        self._draw_nodes()
+
+        # Update scroll region with padding
+        bbox = self.diagram_canvas.bbox('all')
+        if bbox:
+            padding = 50
+            self.diagram_canvas.configure(scrollregion=(
+                bbox[0] - padding, bbox[1] - padding,
+                bbox[2] + padding, bbox[3] + padding
+            ))
+
+    def _draw_start_arrow(self):
+        """Draw the start arrow pointing to initial state I0."""
+        if 0 not in self.node_positions or 0 not in self.node_sizes:
+            return
+
+        x, y = self.node_positions[0]
+        w, h = self.node_sizes[0]
+
+        # Apply scale and offset
+        x = x * self.diagram_scale + self.diagram_offset_x
+        y = y * self.diagram_scale + self.diagram_offset_y
+        w = w * self.diagram_scale
+        h = h * self.diagram_scale
+
+        # Draw arrow from left side
+        arrow_length = 40 * self.diagram_scale
+        start_x = x - w/2 - arrow_length
+        end_x = x - w/2 - 5
+
+        self.diagram_canvas.create_line(
+            start_x, y, end_x, y,
+            arrow=tk.LAST, fill='black', width=2,
+            arrowshape=(10, 12, 5)
+        )
+
+    def _draw_nodes(self):
+        """Draw state nodes as rounded rectangles with items inside."""
+        green_color = '#228B22'  # Forest green like in the reference
+        font_size = 10
+
+        for state in self.parser.states:
+            if state.id not in self.node_positions:
+                continue
+
+            x, y = self.node_positions[state.id]
+            w, h = self.node_sizes.get(state.id, (120, 80))
+
+            # Apply scale and offset
+            x = x * self.diagram_scale + self.diagram_offset_x
+            y = y * self.diagram_scale + self.diagram_offset_y
+            w = w * self.diagram_scale
+            h = h * self.diagram_scale
+
+            # Calculate box coordinates
+            x1, y1 = x - w/2, y - h/2
+            x2, y2 = x + w/2, y + h/2
+
+            # Draw rounded rectangle (using polygon approximation)
+            radius = 15 * self.diagram_scale
+            self._draw_rounded_rect(x1, y1, x2, y2, radius,
+                                   fill='#f0f8f0', outline=green_color, width=2)
+
+            # Draw state label above/outside the box
+            self.diagram_canvas.create_text(
+                x, y1 - 12 * self.diagram_scale,
+                text=f"I{state.id}",
+                font=('Arial', int(font_size * self.diagram_scale), 'bold'),
+                fill=green_color
+            )
+
+            # Draw items inside the box
+            items = sorted(state.items, key=lambda item: (str(item.production), item.dot_position, item.lookahead), reverse=True)
+            max_items = 8  # Limit items to prevent huge boxes
+            item_y = y1 + 15 * self.diagram_scale
+
+            for i, item in enumerate(items[:max_items]):
+                # Format item as "A->.BC" style (compact format)
+                item_text = self._format_item_compact(item)
+                self.diagram_canvas.create_text(
+                    x, item_y,
+                    text=item_text,
+                    font=('Consolas', int((font_size - 1) * self.diagram_scale)),
+                    fill=green_color
+                )
+                item_y += 14 * self.diagram_scale
+
+            # If there are more items, show "..."
+            if len(items) > max_items:
+                self.diagram_canvas.create_text(
+                    x, item_y,
+                    text=f"...+{len(items) - max_items} more",
+                    font=('Consolas', int((font_size - 2) * self.diagram_scale), 'italic'),
+                    fill='gray'
+                )
+
+    def _format_item_compact(self, item) -> str:
+        """Format an LR(1) item in compact notation like 'A->.BC,a'"""
+        prod = item.production
+        right = list(prod.right)
+        right.insert(item.dot_position, '.')
+        right_str = ''.join(right) if right != ['.'] else '.'
+        # For LR(1), include lookahead
+        return f"{prod.left}->{right_str},{item.lookahead}"
+
+    def _draw_rounded_rect(self, x1, y1, x2, y2, radius, **kwargs):
+        """Draw a rounded rectangle on the canvas."""
+        points = [
+            x1 + radius, y1,
+            x2 - radius, y1,
+            x2, y1,
+            x2, y1 + radius,
+            x2, y2 - radius,
+            x2, y2,
+            x2 - radius, y2,
+            x1 + radius, y2,
+            x1, y2,
+            x1, y2 - radius,
+            x1, y1 + radius,
+            x1, y1,
+        ]
+        return self.diagram_canvas.create_polygon(points, smooth=True, **kwargs)
+
+    def _draw_transitions(self):
+        """Draw transition arrows between states."""
+        arrow_color = 'black'
+
+        for state in self.parser.states:
+            if state.id not in self.node_positions:
+                continue
+
+            x1, y1 = self.node_positions[state.id]
+            w1, h1 = self.node_sizes.get(state.id, (120, 80))
+
+            x1 = x1 * self.diagram_scale + self.diagram_offset_x
+            y1 = y1 * self.diagram_scale + self.diagram_offset_y
+            w1 = w1 * self.diagram_scale
+            h1 = h1 * self.diagram_scale
+
+            for symbol, target_id in state.transitions.items():
+                if target_id not in self.node_positions:
+                    continue
+
+                x2, y2 = self.node_positions[target_id]
+                w2, h2 = self.node_sizes.get(target_id, (120, 80))
+
+                x2 = x2 * self.diagram_scale + self.diagram_offset_x
+                y2 = y2 * self.diagram_scale + self.diagram_offset_y
+                w2 = w2 * self.diagram_scale
+                h2 = h2 * self.diagram_scale
+
+                # Self-loop
+                if state.id == target_id:
+                    self._draw_self_loop(x1, y1 - h1/2, w1, symbol)
+                    continue
+
+                # Calculate connection points on box edges
+                start_x, start_y, end_x, end_y = self._calc_edge_points(
+                    x1, y1, w1, h1, x2, y2, w2, h2
+                )
+
+                # Check for bidirectional transitions
+                has_reverse = (target_id in self.node_positions and
+                              any(t == state.id for t in self.parser.states[target_id].transitions.values()))
+
+                # Draw curved arrow for better visibility
+                if has_reverse and state.id < target_id:
+                    # Curve upward
+                    self._draw_curved_arrow(start_x, start_y, end_x, end_y, symbol, curve_offset=30)
+                elif has_reverse and state.id > target_id:
+                    # Curve downward
+                    self._draw_curved_arrow(start_x, start_y, end_x, end_y, symbol, curve_offset=-30)
+                else:
+                    # Draw curved arrow (slight curve for aesthetics)
+                    self._draw_curved_arrow(start_x, start_y, end_x, end_y, symbol, curve_offset=20)
+
+    def _calc_edge_points(self, x1, y1, w1, h1, x2, y2, w2, h2):
+        """Calculate start and end points on box edges for an arrow."""
+        # Direction from center1 to center2
+        dx = x2 - x1
+        dy = y2 - y1
+
+        # Start point: edge of box 1
+        if abs(dx) > abs(dy):
+            # Horizontal connection
+            if dx > 0:
+                start_x = x1 + w1/2
+                end_x = x2 - w2/2
+            else:
+                start_x = x1 - w1/2
+                end_x = x2 + w2/2
+            # Calculate y based on slope
+            if dx != 0:
+                slope = dy / dx
+                start_y = y1 + slope * (start_x - x1)
+                end_y = y2 + slope * (end_x - x2)
+            else:
+                start_y = y1
+                end_y = y2
+        else:
+            # Vertical connection
+            if dy > 0:
+                start_y = y1 + h1/2
+                end_y = y2 - h2/2
+            else:
+                start_y = y1 - h1/2
+                end_y = y2 + h2/2
+            # Calculate x based on slope
+            if dy != 0:
+                slope = dx / dy
+                start_x = x1 + slope * (start_y - y1)
+                end_x = x2 + slope * (end_y - y2)
+            else:
+                start_x = x1
+                end_x = x2
+
+        return start_x, start_y, end_x, end_y
+
+    def _draw_curved_arrow(self, x1, y1, x2, y2, symbol, curve_offset=20):
+        """Draw a curved arrow with a label."""
+        # Calculate midpoint and perpendicular offset for curve
+        mid_x = (x1 + x2) / 2
+        mid_y = (y1 + y2) / 2
+
+        # Perpendicular direction
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.sqrt(dx*dx + dy*dy)
+        if length > 0:
+            # Perpendicular unit vector
+            px = -dy / length
+            py = dx / length
+        else:
+            px, py = 0, 1
+
+        # Control point for curve
+        ctrl_x = mid_x + px * curve_offset * self.diagram_scale
+        ctrl_y = mid_y + py * curve_offset * self.diagram_scale
+
+        # Draw curved line with arrow
+        self.diagram_canvas.create_line(
+            x1, y1, ctrl_x, ctrl_y, x2, y2,
+            smooth=True, arrow=tk.LAST, fill='black', width=2,
+            arrowshape=(10, 12, 5)
+        )
+
+        # Draw label near the control point
+        label_x = ctrl_x
+        label_y = ctrl_y - 10 * self.diagram_scale
+
+        self.diagram_canvas.create_text(
+            label_x, label_y, text=symbol,
+            font=('Arial', int(10 * self.diagram_scale), 'bold'),
+            fill='black'
+        )
+
+    def _draw_self_loop(self, x, y, width, symbol):
+        """Draw a self-loop arrow for a state."""
+        loop_radius = 25 * self.diagram_scale
+        loop_center_y = y - loop_radius
+
+        # Draw arc
+        self.diagram_canvas.create_arc(
+            x - loop_radius, loop_center_y - loop_radius,
+            x + loop_radius, loop_center_y + loop_radius,
+            start=200, extent=320, style=tk.ARC,
+            outline='black', width=2
+        )
+
+        # Draw arrowhead manually
+        arrow_x = x + loop_radius * 0.6
+        arrow_y = loop_center_y + loop_radius * 0.8
+        self.diagram_canvas.create_polygon(
+            arrow_x, arrow_y,
+            arrow_x - 6, arrow_y - 8,
+            arrow_x + 6, arrow_y - 4,
+            fill='black'
+        )
+
+        # Draw label
+        self.diagram_canvas.create_text(
+            x, loop_center_y - loop_radius - 8 * self.diagram_scale,
+            text=symbol,
+            font=('Arial', int(10 * self.diagram_scale), 'bold'),
+            fill='black'
+        )
+
+    def _on_diagram_press(self, event):
+        """Handle mouse press on diagram for panning."""
+        self.dragging = True
+        self.drag_start = (event.x, event.y)
+        self.diagram_canvas.config(cursor='fleur')
+
+    def _on_diagram_drag(self, event):
+        """Handle mouse drag on diagram for panning."""
+        if self.dragging:
+            dx = event.x - self.drag_start[0]
+            dy = event.y - self.drag_start[1]
+            self.diagram_offset_x += dx
+            self.diagram_offset_y += dy
+            self.drag_start = (event.x, event.y)
+            self._draw_diagram()
+
+    def _on_diagram_release(self, event):
+        """Handle mouse release on diagram."""
+        self.dragging = False
+        self.diagram_canvas.config(cursor='')
+
+    def _on_diagram_scroll(self, event):
+        """Handle mouse scroll for zooming."""
+        # Zoom in or out
+        if event.delta > 0:
+            self._zoom_in()
+        else:
+            self._zoom_out()
+
+    def _zoom_in(self):
+        """Zoom in on the diagram."""
+        self.diagram_scale = min(3.0, self.diagram_scale * 1.2)
+        self._draw_diagram()
+
+    def _zoom_out(self):
+        """Zoom out on the diagram."""
+        self.diagram_scale = max(0.3, self.diagram_scale / 1.2)
+        self._draw_diagram()
+
+    def _reset_diagram_view(self):
+        """Reset diagram view to default."""
+        self.diagram_scale = 1.0
+        self.diagram_offset_x = 0
+        self.diagram_offset_y = 0
+        self._draw_diagram()
+
+    def _fit_diagram(self):
+        """Fit diagram to window size."""
+        if not self.node_positions:
+            return
+
+        # Get canvas size
+        canvas_width = self.diagram_canvas.winfo_width()
+        canvas_height = self.diagram_canvas.winfo_height()
+
+        if canvas_width <= 1 or canvas_height <= 1:
+            canvas_width = 800
+            canvas_height = 600
+
+        # Get bounds of all nodes
+        min_x = min(pos[0] for pos in self.node_positions.values())
+        max_x = max(pos[0] for pos in self.node_positions.values())
+        min_y = min(pos[1] for pos in self.node_positions.values())
+        max_y = max(pos[1] for pos in self.node_positions.values())
+
+        # Add padding
+        padding = 100
+        diagram_width = max_x - min_x + 2 * padding
+        diagram_height = max_y - min_y + 2 * padding
+
+        # Calculate scale to fit
+        scale_x = canvas_width / diagram_width if diagram_width > 0 else 1
+        scale_y = canvas_height / diagram_height if diagram_height > 0 else 1
+        self.diagram_scale = min(scale_x, scale_y, 1.5)
+
+        # Center the diagram
+        self.diagram_offset_x = (canvas_width / 2) - ((min_x + max_x) / 2) * self.diagram_scale
+        self.diagram_offset_y = (canvas_height / 2) - ((min_y + max_y) / 2) * self.diagram_scale
+
+        self._draw_diagram()
 
     def _create_table_display(self, parent):
         """Create parsing table display area."""
@@ -393,6 +927,7 @@ class LR1ParserApp:
             self._update_states_display()
             self._update_table_display()
             self._update_conflicts_display()
+            self._reset_diagram_view()  # Draw the diagram
 
             # Update status
             num_states = len(self.parser.states)
@@ -453,7 +988,7 @@ class LR1ParserApp:
         # Add states
         for state in self.parser.states:
             # Group items by their core (production + dot position) for cleaner display
-            items_str = ' | '.join(str(item) for item in sorted(state.items, key=lambda x: (str(x.production), x.dot_position, x.lookahead)))
+            items_str = ' | '.join(str(item) for item in sorted(state.items, key=lambda x: (str(x.production), x.dot_position, x.lookahead), reverse=True))
             self.states_tree.insert('', tk.END, text=f"I{state.id}",
                                     values=(items_str,), iid=str(state.id))
 
@@ -479,13 +1014,13 @@ class LR1ParserApp:
         non_terminals = sorted(self.parser.grammar.non_terminals - {self.parser.grammar.augmented_start})
 
         # Configure columns
-        columns = ['State'] + [f'ACTION\n{t}' for t in terminals] + [f'GOTO\n{nt}' for nt in non_terminals]
+        columns = ['State'] + terminals + non_terminals
         self.table_tree['columns'] = columns
 
         for col in columns:
             self.table_tree.heading(col, text=col)
-            width = 80 if col == 'State' else 70
-            self.table_tree.column(col, width=width, minwidth=60, anchor='center')
+            width = 80 if col == 'State' else 60
+            self.table_tree.column(col, width=width, minwidth=50, anchor='center')
 
         # Add rows
         for state in self.parser.states:
@@ -701,6 +1236,14 @@ class LR1ParserApp:
         self.conflicts_text.delete('1.0', tk.END)
         self.conflicts_text.config(state=tk.DISABLED)
         self.conflict_summary.config(text="No conflicts detected.", style='Success.TLabel')
+
+        # Clear diagram
+        self.diagram_canvas.delete('all')
+        self.node_positions.clear()
+        self.node_sizes.clear()
+        self.diagram_scale = 1.0
+        self.diagram_offset_x = 0
+        self.diagram_offset_y = 0
 
         self._reset_simulation()
 
